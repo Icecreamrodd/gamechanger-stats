@@ -144,44 +144,70 @@ def scrape_one_game(url: str, driver):
 ##############################################################################
 # 4. aggregate all URLs
 ##############################################################################
-def aggregate(urls: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def aggregate(urls: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame,
+                                        pd.DataFrame, pd.DataFrame]:
     profile = clone_profile(Path(args.profile))
     drv = make_driver(profile, headless=not args.headful)
 
-    player_rows, team_rows = [], []
+    batting_lines, pitching_lines   = [], []
+    batting_totals, pitching_totals = [], []
+
     try:
         for url in urls:
             grids, date_str, gid = scrape_one_game(url, drv)
-            for section, df_list in (("batting", grids["batting"]),
-                                     ("pitching", grids["pitching"])):
-                for df in df_list:
-                    df["section"] = section
-                    df["game_id"] = gid
-                    df["game_date"] = date_str
-                    player_rows.append(df)
 
-            for section, df_list in (("batting", grids["batting_totals"]),
-                                     ("pitching", grids["pitching_totals"])):
-                for df in df_list:
-                    df["section"] = section
-                    df["game_id"] = gid
-                    df["game_date"] = date_str
-                    team_rows.append(df)
+            # ── player lines ────────────────────────────────────────
+            for df in grids["batting"]:
+                df["game_id"] = gid; df["game_date"] = date_str
+                batting_lines.append(df)
+            for df in grids["pitching"]:
+                df["game_id"] = gid; df["game_date"] = date_str
+                pitching_lines.append(df)
+
+            # ── team totals ────────────────────────────────────────
+            for df in grids["batting_totals"]:
+                df["game_id"] = gid; df["game_date"] = date_str
+                batting_totals.append(df)
+            for df in grids["pitching_totals"]:
+                df["game_id"] = gid; df["game_date"] = date_str
+                pitching_totals.append(df)
+
     finally:
         drv.quit()
 
-    players = pd.concat(player_rows, ignore_index=True) if player_rows else pd.DataFrame()
-    teams   = pd.concat(team_rows, ignore_index=True)   if team_rows   else pd.DataFrame()
-    return players, teams
+    return (
+        pd.concat(batting_lines,  ignore_index=True) if batting_lines  else pd.DataFrame(),
+        pd.concat(pitching_lines, ignore_index=True) if pitching_lines else pd.DataFrame(),
+        pd.concat(batting_totals, ignore_index=True) if batting_totals else pd.DataFrame(),
+        pd.concat(pitching_totals, ignore_index=True) if pitching_totals else pd.DataFrame(),
+    )
+
 
 ##############################################################################
 # 5. MAIN
 ##############################################################################
-players_df, teams_df = aggregate(URLS)
+# main
+bat_lines, pit_lines, bat_tot, pit_tot = aggregate(URLS)
 
-print("\nPlayer DF preview:\n", players_df.head())
-print("\nTeam DF preview:\n",   teams_df.head())
+if "LINEUP" in bat_lines.columns:
+    split_df = bat_lines["LINEUP"].str.extract(r"^\s*([^()]+)\s*\(([^)]*)\)")
+    bat_lines["player"]            = split_df[0].str.strip()
+    bat_lines["positions_played"]  = split_df[1].str.strip()
+    bat_lines = bat_lines.drop(columns="LINEUP")
 
-players_df.to_csv("season_player_lines.csv", index=False)
-teams_df.to_csv("season_team_totals.csv", index=False)
-print("\n✅  Saved season_player_lines.csv & season_team_totals.csv")
+print("\nBatting lines preview:\n",   bat_lines.head())
+print("\nPitching lines preview:\n",  pit_lines.head())
+print("\nTeam batting totals:\n",     bat_tot.head())
+print("\nTeam pitching totals:\n",    pit_tot.head())
+
+bat_lines.to_csv("season_batting_lines.csv",  index=False)
+pit_lines.to_csv("season_pitching_lines.csv", index=False)
+bat_tot.to_csv("season_team_batting.csv",     index=False)
+pit_tot.to_csv("season_team_pitching.csv",    index=False)
+
+print("\n✅  Saved:")
+print("  • season_batting_lines.csv")
+print("  • season_pitching_lines.csv")
+print("  • season_team_batting.csv")
+print("  • season_team_pitching.csv")
+
