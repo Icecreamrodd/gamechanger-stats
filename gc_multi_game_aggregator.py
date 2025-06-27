@@ -117,29 +117,43 @@ def parse_player_grids(html: str) -> Dict[str, List[pd.DataFrame]]:
 EVENT_TIME_SEL = 'div[data-testid="event-time"]'
 GAME_ID_RE     = re.compile(r"/games/([0-9a-f\-]{36})")
 UUID_RE = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", re.I)
-
-
-
+TEAM_LINK_SEL = 'header a[href*="/teams/"]'   # works for all GC themes
 
 def scrape_one_game(url: str, driver):
     driver.get(url)
     if "login" in driver.current_url:
-        raise RuntimeError("Chrome profile is not logged in. Open Chrome with that profile and sign in once.")
+        raise RuntimeError("Chrome profile isn’t logged in—open Chrome once and sign in.")
 
     WebDriverWait(driver, 30).until(
         EC.presence_of_element_located((By.CSS_SELECTOR, 'div[col-id="player"]'))
     )
 
-    html = driver.page_source
-    soup = BeautifulSoup(html, "html.parser")
-    date_str = soup.select_one(EVENT_TIME_SEL).get_text(strip=True)
-    match = UUID_RE.search(url)
-    if not match:
-        raise ValueError(f"Cannot find a game UUID in URL: {url}")
-    game_id = match.group(1)
+    html  = driver.page_source
+    soup  = BeautifulSoup(html, "html.parser")
 
+    # ── game-date string ───────────────────────────────────────────────
+    date_str = soup.select_one(EVENT_TIME_SEL).get_text(strip=True)
+
+    # ── team names  (new selectors, fallback to old link text) ─────────
+    away_tag = soup.select_one('[data-testid="away-team-name"]')
+    home_tag = soup.select_one('[data-testid="home-team-name"]')
+
+    if away_tag and home_tag:
+        away_team = away_tag.get_text(strip=True)
+        home_team = home_tag.get_text(strip=True)
+    else:                                       # legacy header layout
+        tags = soup.select('header a[href*="/teams/"]')[:2]
+        names = [t.get_text(strip=True) for t in tags]
+        away_team, home_team = (names + ["unknown", "unknown"])[:2]
+
+    # ── game_id from URL ───────────────────────────────────────────────
+    game_id = UUID_RE.search(url).group(1)
+
+    # ── player / totals grids ──────────────────────────────────────────
     grids = parse_player_grids(html)
-    return grids, date_str, game_id
+
+    # return ➜ grids, date, game_id, (away, home)
+    return grids, date_str, game_id, (away_team, home_team)
 
 ##############################################################################
 # 4. aggregate all URLs
@@ -154,23 +168,41 @@ def aggregate(urls: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame,
 
     try:
         for url in urls:
-            grids, date_str, gid = scrape_one_game(url, drv)
+            grids, date_str, gid, (away_team, home_team) = scrape_one_game(url, drv)
 
-            # ── player lines ────────────────────────────────────────
-            for df in grids["batting"]:
-                df["game_id"] = gid; df["game_date"] = date_str
-                batting_lines.append(df)
-            for df in grids["pitching"]:
-                df["game_id"] = gid; df["game_date"] = date_str
-                pitching_lines.append(df)
+            mapping = [
+                ("batting",  grids["batting"], grids["batting_totals"]),
+                ("pitching", grids["pitching"], grids["pitching_totals"]),
+            ]
+            for section, line_dfs, tot_dfs in mapping:
+                # ---------- player lines ----------
+                if line_dfs:
+                    # away  lines
+                    line_dfs[0]["team_name"] = away_team
+                    line_dfs[0]["home_away"] = "away"
+                    # home  lines
+                    if len(line_dfs) > 1:
+                        line_dfs[1]["team_name"] = home_team
+                        line_dfs[1]["home_away"] = "home"
+                    for df in line_dfs:
+                        df["section"] = section
+                        df["game_id"] = gid
+                        df["game_date"] = date_str
+                        (batting_lines if section=="batting" else pitching_lines).append(df)
 
-            # ── team totals ────────────────────────────────────────
-            for df in grids["batting_totals"]:
-                df["game_id"] = gid; df["game_date"] = date_str
-                batting_totals.append(df)
-            for df in grids["pitching_totals"]:
-                df["game_id"] = gid; df["game_date"] = date_str
-                pitching_totals.append(df)
+                # ---------- team totals ----------
+                if tot_dfs:
+                    tot_dfs[0]["team_name"] = away_team
+                    tot_dfs[0]["home_away"] = "away"
+                    if len(tot_dfs) > 1:
+                        tot_dfs[1]["team_name"] = home_team
+                        tot_dfs[1]["home_away"] = "home"
+                    for df in tot_dfs:
+                        df["section"]   = section
+                        df["game_id"]   = gid
+                        df["game_date"] = date_str
+                        (batting_totals if section=="batting" else pitching_totals).append(df)
+
 
     finally:
         drv.quit()
@@ -210,4 +242,3 @@ print("  • season_batting_lines.csv")
 print("  • season_pitching_lines.csv")
 print("  • season_team_batting.csv")
 print("  • season_team_pitching.csv")
-
